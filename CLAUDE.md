@@ -28,8 +28,9 @@ s3://bucket/prefix/
 |---|---|
 | Manifest read/write | GetObject / PutObject (atomic for single objects) |
 | Snapshot write/load | PutObject / GetObject |
-| WAL append | GetObject + concatenate + PutObject (no native append in S3) |
-| WAL truncate | GetObject + remove last line + PutObject |
+| WAL append | Single PutObject per batch (per-batch objects, no download needed) |
+| WAL read | ListObjectsV2 + parallel GetObject per batch (with incremental caching) |
+| WAL truncate | DeleteObject last batch (or modify if multi-op batch) |
 | Lock acquire | PutObject with `IfNoneMatch: *` (conditional create) |
 | Lock release | DeleteObject |
 | Stale lock recovery | Read lock body, check TTL, delete if expired |
