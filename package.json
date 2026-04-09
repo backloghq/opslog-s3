@@ -1,0 +1,52 @@
+{
+  "name": "@backloghq/opslog-s3",
+  "version": "0.1.0",
+  "description": "S3 storage backend for @backloghq/opslog. Enables multi-writer concurrency across machines via Amazon S3.",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "scripts": {
+    "build": "tsc",
+    "dev": "tsc --watch",
+    "lint": "eslint src/ tests/",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "test:coverage": "vitest run --coverage",
+    "test:integration": "vitest run tests/s3-real.test.ts"
+  },
+  "keywords": [
+    "opslog",
+    "s3",
+    "storage-backend",
+    "event-sourcing",
+    "multi-writer",
+    "aws"
+  ],
+  "author": "mbocevski",
+  "license": "MIT",
+  "type": "module",
+  "engines": {
+    "node": ">=20"
+  },
+  "files": [
+    "dist/",
+    "README.md",
+    "LICENSE"
+  ],
+  "dependencies": {
+    "@aws-sdk/client-s3": "^3.800.0"
+  },
+  "peerDependencies": {
+    "@backloghq/opslog": ">=0.3.0"
+  },
+  "devDependencies": {
+    "@aws-sdk/credential-providers": "^3.1027.0",
+    "@backloghq/opslog": "file:../opslog",
+    "@eslint/js": "^10.0.0",
+    "@types/node": "^25.0.0",
+    "@vitest/coverage-v8": "^4.1.2",
+    "eslint": "^10.0.0",
+    "typescript": "~6.0.2",
+    "typescript-eslint": "^8.58.0",
+    "vitest": "^4.1.2"
+  }
+}
