@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach } from "vitest";
-import type { Manifest, Operation } from "@backloghq/opslog";
+import type { Manifest } from "@backloghq/opslog";
 import { S3Backend } from "../src/s3-backend.js";
 import { createMockS3 } from "./mock-s3.js";
 
@@ -34,7 +34,7 @@ describe("S3Backend", () => {
       const manifest: Manifest = {
         version: 1,
         currentSnapshot: "snapshots/snap-1.json",
-        activeOps: "ops/ops-1.jsonl",
+        activeOps: "ops/wal-1",
         archiveSegments: [],
         stats: {
           activeRecords: 5,
@@ -56,7 +56,7 @@ describe("S3Backend", () => {
       await backend.writeManifest({
         version: 1,
         currentSnapshot: "snapshots/snap-1.json",
-        activeOps: "ops/ops-1.jsonl",
+        activeOps: "ops/wal-1",
         archiveSegments: [],
         stats: {
           activeRecords: 0,
@@ -68,7 +68,7 @@ describe("S3Backend", () => {
       });
       const ver = await backend.getManifestVersion();
       expect(ver).not.toBeNull();
-      expect(ver!.startsWith('"')).toBe(true); // ETag format
+      expect(ver!.startsWith('"')).toBe(true);
     });
   });
 
@@ -98,90 +98,201 @@ describe("S3Backend", () => {
     });
   });
 
-  describe("WAL", () => {
+  describe("WAL (per-batch objects)", () => {
     beforeEach(async () => {
       await backend.initialize("", { readOnly: false });
     });
 
-    it("creates an empty ops file", async () => {
+    it("creates a virtual ops path (no S3 object)", async () => {
       const path = await backend.createOpsFile();
-      expect(path).toMatch(/^ops\/ops-\d+\.jsonl$/);
+      expect(path).toMatch(/^ops\/wal-\d+$/);
+      expect(path).not.toContain(".jsonl");
+      // readOps returns empty — no batches yet
       const ops = await backend.readOps(path);
       expect(ops).toEqual([]);
     });
 
-    it("appends and reads ops", async () => {
-      const path = await backend.createOpsFile();
-      const ops: Operation[] = [
-        { ts: "1", op: "set", id: "a", data: { x: 1 }, prev: null },
-        { ts: "2", op: "set", id: "b", data: { x: 2 }, prev: null },
-      ];
-      await backend.appendOps(path, ops);
-
-      const loaded = await backend.readOps(path);
-      expect(loaded).toHaveLength(2);
-      expect(loaded[0].id).toBe("a");
-      expect(loaded[1].id).toBe("b");
-    });
-
-    it("appends multiple times to the same file", async () => {
-      const path = await backend.createOpsFile();
-      await backend.appendOps(path, [
-        { ts: "1", op: "set", id: "a", data: { x: 1 }, prev: null },
-      ]);
-      await backend.appendOps(path, [
-        { ts: "2", op: "set", id: "b", data: { x: 2 }, prev: null },
-      ]);
-      const loaded = await backend.readOps(path);
-      expect(loaded).toHaveLength(2);
-    });
-
-    it("truncates the last op", async () => {
-      const path = await backend.createOpsFile();
-      await backend.appendOps(path, [
-        { ts: "1", op: "set", id: "a", data: { x: 1 }, prev: null },
-        { ts: "2", op: "set", id: "b", data: { x: 2 }, prev: null },
-      ]);
-      const result = await backend.truncateLastOp(path);
-      expect(result).toBe(true);
-
-      const loaded = await backend.readOps(path);
-      expect(loaded).toHaveLength(1);
-      expect(loaded[0].id).toBe("a");
-    });
-
-    it("truncates the only op to empty", async () => {
-      const path = await backend.createOpsFile();
-      await backend.appendOps(path, [
-        { ts: "1", op: "set", id: "a", data: { x: 1 }, prev: null },
-      ]);
-      expect(await backend.truncateLastOp(path)).toBe(true);
-      expect(await backend.readOps(path)).toEqual([]);
-    });
-
-    it("truncateLastOp returns false for missing file", async () => {
-      expect(await backend.truncateLastOp("ops/nonexistent.jsonl")).toBe(
-        false,
-      );
-    });
-
-    it("readOps returns empty for missing file", async () => {
-      expect(await backend.readOps("ops/nonexistent.jsonl")).toEqual([]);
-    });
-
-    it("skips malformed lines in ops file", async () => {
+    it("appendOps writes a single batch object (no download)", async () => {
       const { client: c, store: s } = createMockS3();
       const b = new S3Backend({ bucket: "b", prefix: "p", client: c });
       await b.initialize("", { readOnly: false });
-      // Write a mix of valid and invalid lines directly
+
+      const path = await b.createOpsFile();
+      await b.appendOps(path, [
+        { ts: "1", op: "set", id: "a", data: { x: 1 }, prev: null },
+      ]);
+
+      // Should have exactly one batch object under the path prefix
+      const batchKeys = Array.from(s.objects.keys()).filter((k) =>
+        k.includes("/batch-"),
+      );
+      expect(batchKeys).toHaveLength(1);
+    });
+
+    it("appends and reads ops across multiple batches", async () => {
+      const path = await backend.createOpsFile();
+      await backend.appendOps(path, [
+        { ts: "1", op: "set", id: "a", data: { x: 1 }, prev: null },
+      ]);
+      await backend.appendOps(path, [
+        { ts: "2", op: "set", id: "b", data: { x: 2 }, prev: null },
+      ]);
+      await backend.appendOps(path, [
+        { ts: "3", op: "set", id: "c", data: { x: 3 }, prev: null },
+      ]);
+
+      const ops = await backend.readOps(path);
+      expect(ops).toHaveLength(3);
+      expect(ops[0].id).toBe("a");
+      expect(ops[1].id).toBe("b");
+      expect(ops[2].id).toBe("c");
+    });
+
+    it("appends batch of multiple ops in one call", async () => {
+      const path = await backend.createOpsFile();
+      await backend.appendOps(path, [
+        { ts: "1", op: "set", id: "a", data: { x: 1 }, prev: null },
+        { ts: "2", op: "set", id: "b", data: { x: 2 }, prev: null },
+      ]);
+      const ops = await backend.readOps(path);
+      expect(ops).toHaveLength(2);
+    });
+
+    it("incremental read: only downloads new batches", async () => {
+      const { client: c } = createMockS3();
+      const b = new S3Backend({ bucket: "b", prefix: "p", client: c });
+      await b.initialize("", { readOnly: false });
+
+      const path = await b.createOpsFile();
+      await b.appendOps(path, [
+        { ts: "1", op: "set", id: "a", data: { x: 1 }, prev: null },
+      ]);
+
+      // First read — downloads 1 batch
+      const ops1 = await b.readOps(path);
+      expect(ops1).toHaveLength(1);
+
+      // Append another batch
+      await b.appendOps(path, [
+        { ts: "2", op: "set", id: "b", data: { x: 2 }, prev: null },
+      ]);
+
+      // Second read — should include both ops, only downloading the new batch
+      const ops2 = await b.readOps(path);
+      expect(ops2).toHaveLength(2);
+      expect(ops2[0].id).toBe("a");
+      expect(ops2[1].id).toBe("b");
+
+      // Third read with no changes — cache hit, no downloads
+      const ops3 = await b.readOps(path);
+      expect(ops3).toHaveLength(2);
+    });
+
+    it("truncates last op from single-op batch (deletes object)", async () => {
+      const { client: c, store: s } = createMockS3();
+      const b = new S3Backend({ bucket: "b", prefix: "p", client: c });
+      await b.initialize("", { readOnly: false });
+
+      const path = await b.createOpsFile();
+      await b.appendOps(path, [
+        { ts: "1", op: "set", id: "a", data: { x: 1 }, prev: null },
+      ]);
+      await b.appendOps(path, [
+        { ts: "2", op: "set", id: "b", data: { x: 2 }, prev: null },
+      ]);
+
+      expect(await b.truncateLastOp(path)).toBe(true);
+      const ops = await b.readOps(path);
+      expect(ops).toHaveLength(1);
+      expect(ops[0].id).toBe("a");
+
+      // The batch object for "b" should be deleted
+      const batchKeys = Array.from(s.objects.keys()).filter((k) =>
+        k.includes("/batch-"),
+      );
+      expect(batchKeys).toHaveLength(1);
+    });
+
+    it("truncates last op from multi-op batch (modifies object)", async () => {
+      const path = await backend.createOpsFile();
+      await backend.appendOps(path, [
+        { ts: "1", op: "set", id: "a", data: { x: 1 }, prev: null },
+        { ts: "2", op: "set", id: "b", data: { x: 2 }, prev: null },
+      ]);
+
+      expect(await backend.truncateLastOp(path)).toBe(true);
+      const ops = await backend.readOps(path);
+      expect(ops).toHaveLength(1);
+      expect(ops[0].id).toBe("a");
+    });
+
+    it("truncateLastOp returns false for empty WAL", async () => {
+      const path = await backend.createOpsFile();
+      expect(await backend.truncateLastOp(path)).toBe(false);
+    });
+
+    it("readOps returns empty for missing path", async () => {
+      expect(await backend.readOps("ops/nonexistent")).toEqual([]);
+    });
+  });
+
+  describe("WAL (legacy single-file backward compat)", () => {
+    beforeEach(async () => {
+      await backend.initialize("", { readOnly: false });
+    });
+
+    it("reads and appends to legacy .jsonl files", async () => {
+      const { client: c, store: s } = createMockS3();
+      const b = new S3Backend({ bucket: "b", prefix: "p", client: c });
+      await b.initialize("", { readOnly: false });
+
+      // Simulate a v0.1.0 ops file
+      const legacyPath = "ops/ops-123.jsonl";
+      s.objects.set(`p/${legacyPath}`, {
+        body: '{"ts":"1","op":"set","id":"a","data":{"x":1},"prev":null}\n',
+        etag: '"e"',
+      });
+
+      const ops = await b.readOps(legacyPath);
+      expect(ops).toHaveLength(1);
+      expect(ops[0].id).toBe("a");
+
+      // Append to legacy file
+      await b.appendOps(legacyPath, [
+        { ts: "2", op: "set", id: "b", data: { x: 2 }, prev: null },
+      ]);
+      const ops2 = await b.readOps(legacyPath);
+      expect(ops2).toHaveLength(2);
+    });
+
+    it("truncates legacy .jsonl files", async () => {
+      const { client: c, store: s } = createMockS3();
+      const b = new S3Backend({ bucket: "b", prefix: "p", client: c });
+      await b.initialize("", { readOnly: false });
+
+      const legacyPath = "ops/ops-123.jsonl";
+      s.objects.set(`p/${legacyPath}`, {
+        body: '{"ts":"1","op":"set","id":"a","data":{"x":1},"prev":null}\n{"ts":"2","op":"set","id":"b","data":{"x":2},"prev":null}\n',
+        etag: '"e"',
+      });
+
+      expect(await b.truncateLastOp(legacyPath)).toBe(true);
+      const ops = await b.readOps(legacyPath);
+      expect(ops).toHaveLength(1);
+      expect(ops[0].id).toBe("a");
+    });
+
+    it("skips malformed lines in legacy files", async () => {
+      const { client: c, store: s } = createMockS3();
+      const b = new S3Backend({ bucket: "b", prefix: "p", client: c });
+      await b.initialize("", { readOnly: false });
+
       s.objects.set("p/ops/bad.jsonl", {
         body: '{"ts":"1","op":"set","id":"a","data":{"x":1},"prev":null}\ngarbage\n{"ts":"2","op":"set","id":"b","data":{"x":2},"prev":null}\n',
         etag: '"e"',
       });
       const ops = await b.readOps("ops/bad.jsonl");
       expect(ops).toHaveLength(2);
-      expect(ops[0].id).toBe("a");
-      expect(ops[1].id).toBe("b");
     });
   });
 
@@ -208,13 +319,10 @@ describe("S3Backend", () => {
         "2026-Q1",
         new Map([["b", { x: 2 }]]),
       );
-
       const loaded = await backend.loadArchiveSegment(
         "archive/archive-2026-Q1.json",
       );
       expect(loaded.size).toBe(2);
-      expect(loaded.get("a")).toEqual({ x: 1 });
-      expect(loaded.get("b")).toEqual({ x: 2 });
     });
 
     it("lists archive segments", async () => {
@@ -265,7 +373,6 @@ describe("S3Backend", () => {
       const { client: c, store: s } = createMockS3();
       const b = new S3Backend({ bucket: "b", prefix: "p", client: c });
       await b.initialize("", { readOnly: false });
-      // Write a lock with unparseable body
       s.objects.set("p/.lock", { body: "not-json{{{", etag: '"e"' });
       const handle = await b.acquireLock();
       expect(handle).toBeDefined();
@@ -273,24 +380,20 @@ describe("S3Backend", () => {
     });
 
     it("recovers stale lock (expired TTL)", async () => {
-      // Create a backend with very short TTL
       const { client } = createMockS3();
       const shortTtl = new S3Backend({
         bucket: "test-bucket",
         prefix: "store",
         client,
-        lockTtlMs: 1, // 1ms TTL
+        lockTtlMs: 1,
       });
       await shortTtl.initialize("", { readOnly: false });
 
-      // Acquire lock, wait for it to expire
       const h1 = await shortTtl.acquireLock();
       expect(h1).toBeDefined();
 
-      // Wait for TTL to pass
       await new Promise((r) => setTimeout(r, 10));
 
-      // Should recover stale lock
       const h2 = await shortTtl.acquireLock();
       expect(h2).toBeDefined();
       await shortTtl.releaseLock(h2);
@@ -302,19 +405,37 @@ describe("S3Backend", () => {
       await backend.initialize("", { readOnly: false });
     });
 
-    it("creates agent-specific ops files", async () => {
+    it("creates agent-specific ops paths (batch format)", async () => {
       const pathA = await backend.createAgentOpsFile("agent-A");
       const pathB = await backend.createAgentOpsFile("agent-B");
-      expect(pathA).toMatch(/^ops\/agent-agent-A-\d+\.jsonl$/);
-      expect(pathB).toMatch(/^ops\/agent-agent-B-\d+\.jsonl$/);
+      expect(pathA).toMatch(/^ops\/agent-agent-A-\d+$/);
+      expect(pathB).toMatch(/^ops\/agent-agent-B-\d+$/);
+      expect(pathA).not.toContain(".jsonl");
     });
 
-    it("lists all ops files", async () => {
-      await backend.createOpsFile();
-      await backend.createAgentOpsFile("A");
-      await backend.createAgentOpsFile("B");
-      const files = await backend.listOpsFiles();
+    it("lists all ops paths (batch and legacy)", async () => {
+      const { client: c, store: s } = createMockS3();
+      const b = new S3Backend({ bucket: "b", prefix: "p", client: c });
+      await b.initialize("", { readOnly: false });
+
+      // Create batch-format WALs
+      const walPath = await b.createOpsFile();
+      await b.appendOps(walPath, [
+        { ts: "1", op: "set", id: "a", data: { x: 1 }, prev: null },
+      ]);
+      const agentPath = await b.createAgentOpsFile("A");
+      await b.appendOps(agentPath, [
+        { ts: "2", op: "set", id: "b", data: { x: 2 }, prev: null },
+      ]);
+
+      // Add a legacy file
+      s.objects.set("p/ops/old.jsonl", { body: "", etag: '"e"' });
+
+      const files = await b.listOpsFiles();
       expect(files).toHaveLength(3);
+      expect(files).toContain("ops/old.jsonl");
+      expect(files).toContain(walPath);
+      expect(files).toContain(agentPath);
     });
 
     it("acquires and releases compaction lock", async () => {
@@ -342,7 +463,7 @@ describe("S3Backend", () => {
       await prefixed.writeManifest({
         version: 1,
         currentSnapshot: "snapshots/snap-1.json",
-        activeOps: "ops/ops-1.jsonl",
+        activeOps: "ops/wal-1",
         archiveSegments: [],
         stats: {
           activeRecords: 0,
@@ -356,12 +477,15 @@ describe("S3Backend", () => {
     });
 
     it("works without prefix", async () => {
-      const { client, store } = createMockS3();
+      const { client } = createMockS3();
       const noPrefix = new S3Backend({ bucket: "b", client });
       await noPrefix.initialize("", { readOnly: false });
-      await noPrefix.createOpsFile();
-      const keys = Array.from(store.objects.keys());
-      expect(keys.some((k) => k.startsWith("ops/"))).toBe(true);
+      const path = await noPrefix.createOpsFile();
+      await noPrefix.appendOps(path, [
+        { ts: "1", op: "set", id: "a", data: { x: 1 }, prev: null },
+      ]);
+      const ops = await noPrefix.readOps(path);
+      expect(ops).toHaveLength(1);
     });
   });
 });

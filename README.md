@@ -90,14 +90,22 @@ s3://bucket/prefix/
   archive/archive-<period>.json       # Archived records
 ```
 
-### WAL operations
+### WAL operations (per-batch objects)
 
-S3 has no native append or truncate. The S3Backend implements these as download-modify-upload:
+S3 has no native append. Instead of downloading, concatenating, and re-uploading a single growing file, the S3Backend stores each write as a separate S3 object:
 
-- **Append**: GetObject → concatenate new ops → PutObject
-- **Truncate**: GetObject → remove last line → PutObject
+```
+ops/agent-A-1744200000/
+  batch-1744200001-0000.jsonl   (ops from first write)
+  batch-1744200002-0000.jsonl   (ops from second write)
+  batch-1744200003-0000.jsonl   (ops from third write)
+```
 
-This is O(n) per WAL file but files are regularly compacted. For high-throughput scenarios, consider lowering `checkpointThreshold`.
+- **Append**: single PutObject per write (no download needed)
+- **Read**: ListObjectsV2 + parallel GetObject per batch, with incremental caching (only new batches are downloaded on subsequent reads)
+- **Truncate**: delete last batch object (or modify if it contains multiple ops)
+
+Stores created with v0.1.0 (single `.jsonl` files) are transparently supported — the backend detects the format automatically.
 
 ### Locking
 

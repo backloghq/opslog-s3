@@ -48,12 +48,36 @@ function isPreconditionFailed(err: unknown): boolean {
   return false;
 }
 
+function parseOpsFromContent(content: string, source: string): Operation[] {
+  const lines = content.trim().split("\n").filter(Boolean);
+  const ops: Operation[] = [];
+  let skipped = 0;
+  for (const line of lines) {
+    try {
+      ops.push(validateOp(JSON.parse(line)));
+    } catch {
+      skipped++;
+    }
+  }
+  if (skipped > 0) {
+    console.error(
+      `opslog-s3: skipped ${skipped} malformed line(s) in ${source}`,
+    );
+  }
+  return ops;
+}
+
 interface S3LockData {
   agent: string;
   hostname: string;
   pid: number;
   timestamp: number;
   ttlMs: number;
+}
+
+interface OpsCache {
+  ops: Operation[];
+  lastBatchKey: string;
 }
 
 class S3LockHandle implements LockHandle {
@@ -67,6 +91,8 @@ export class S3Backend implements StorageBackend {
   private bucket: string;
   private prefix: string;
   private lockTtlMs: number;
+  private batchCounter = 0;
+  private opsCache = new Map<string, OpsCache>();
 
   constructor(options: S3BackendOptions) {
     this.bucket = options.bucket;
@@ -90,6 +116,20 @@ export class S3Backend implements StorageBackend {
     return this.prefix ? fullKey.slice(this.prefix.length + 1) : fullKey;
   }
 
+  /**
+   * Paths ending with .jsonl are legacy single-file WALs (v0.1.0).
+   * Paths without .jsonl use per-batch objects (v0.1.1+).
+   */
+  private isBatchFormat(relativePath: string): boolean {
+    return !relativePath.endsWith(".jsonl");
+  }
+
+  private nextBatchKey(relativePath: string): string {
+    const ts = Date.now();
+    const seq = String(this.batchCounter++).padStart(4, "0");
+    return this.key(`${relativePath}/batch-${ts}-${seq}.jsonl`);
+  }
+
   // -- Lifecycle --
 
   // eslint-disable-next-line @typescript-eslint/no-unused-vars
@@ -98,6 +138,7 @@ export class S3Backend implements StorageBackend {
   }
 
   async shutdown(): Promise<void> {
+    this.opsCache.clear();
     if (this.ownsClient) {
       this.client.destroy();
     }
@@ -146,10 +187,45 @@ export class S3Backend implements StorageBackend {
   }
 
   private async listKeys(prefix: string): Promise<string[]> {
-    const result = await this.client.send(
-      new ListObjectsV2Command({ Bucket: this.bucket, Prefix: prefix }),
+    const keys: string[] = [];
+    let continuationToken: string | undefined;
+    do {
+      const result = await this.client.send(
+        new ListObjectsV2Command({
+          Bucket: this.bucket,
+          Prefix: prefix,
+          ContinuationToken: continuationToken,
+        }),
+      );
+      for (const obj of result.Contents ?? []) {
+        if (obj.Key) keys.push(obj.Key);
+      }
+      continuationToken = result.IsTruncated
+        ? result.NextContinuationToken
+        : undefined;
+    } while (continuationToken);
+    return keys;
+  }
+
+  /** List batch keys under a WAL prefix, sorted lexicographically. */
+  private async listBatchKeys(relativePath: string): Promise<string[]> {
+    const prefix = this.key(relativePath) + "/";
+    const keys = await this.listKeys(prefix);
+    return keys.filter((k) => k.endsWith(".jsonl")).sort();
+  }
+
+  /** Download multiple batch objects in parallel and parse ops from each. */
+  private async downloadBatches(batchKeys: string[]): Promise<Operation[]> {
+    const contents = await Promise.all(
+      batchKeys.map((k) => this.getObject(k)),
     );
-    return (result.Contents ?? []).map((obj) => obj.Key!).filter(Boolean);
+    const ops: Operation[] = [];
+    for (let i = 0; i < contents.length; i++) {
+      if (contents[i].trim().length > 0) {
+        ops.push(...parseOpsFromContent(contents[i], batchKeys[i]));
+      }
+    }
+    return ops;
   }
 
   // -- Manifest --
@@ -202,64 +278,114 @@ export class S3Backend implements StorageBackend {
   }
 
   // -- WAL --
-  // S3 has no append — download, concatenate, re-upload.
+  // v0.1.1+: per-batch S3 objects. Each appendOps is a single PutObject (no download).
+  // v0.1.0 legacy: single .jsonl file (download-append-upload).
 
   async appendOps(relativePath: string, ops: Operation[]): Promise<void> {
-    const key = this.key(relativePath);
-    const existing = (await this.getObjectOrNull(key)) ?? "";
+    if (!this.isBatchFormat(relativePath)) {
+      // Legacy single-file format (v0.1.0 backward compat)
+      const key = this.key(relativePath);
+      const existing = (await this.getObjectOrNull(key)) ?? "";
+      const lines = ops.map((op) => JSON.stringify(op)).join("\n") + "\n";
+      await this.putObject(key, existing + lines, "application/x-ndjson");
+      return;
+    }
+
+    // Per-batch: single PutObject, no download needed
+    const batchKey = this.nextBatchKey(relativePath);
     const lines = ops.map((op) => JSON.stringify(op)).join("\n") + "\n";
-    await this.putObject(key, existing + lines, "application/x-ndjson");
+    await this.putObject(batchKey, lines, "application/x-ndjson");
+
+    // Update cache if present
+    const cached = this.opsCache.get(relativePath);
+    if (cached) {
+      cached.ops.push(...ops);
+      cached.lastBatchKey = batchKey;
+    }
   }
 
   async readOps(relativePath: string): Promise<Operation[]> {
-    const content = await this.getObjectOrNull(this.key(relativePath));
-    if (content === null || content.trim().length === 0) return [];
-    const lines = content.trim().split("\n").filter(Boolean);
-    const ops: Operation[] = [];
-    let skipped = 0;
-    for (const line of lines) {
-      try {
-        ops.push(validateOp(JSON.parse(line)));
-      } catch {
-        skipped++;
-      }
+    if (!this.isBatchFormat(relativePath)) {
+      // Legacy single-file format
+      const content = await this.getObjectOrNull(this.key(relativePath));
+      if (content === null || content.trim().length === 0) return [];
+      return parseOpsFromContent(content, relativePath);
     }
-    if (skipped > 0) {
-      console.error(
-        `opslog-s3: skipped ${skipped} malformed line(s) in ${relativePath}`,
-      );
+
+    // Per-batch: list batches, download (with incremental caching)
+    const allBatchKeys = await this.listBatchKeys(relativePath);
+    if (allBatchKeys.length === 0) return [];
+
+    const cached = this.opsCache.get(relativePath);
+    if (cached) {
+      const newKeys = allBatchKeys.filter((k) => k > cached.lastBatchKey);
+      if (newKeys.length === 0) return [...cached.ops];
+
+      // Only download new batches
+      const newOps = await this.downloadBatches(newKeys);
+      cached.ops.push(...newOps);
+      cached.lastBatchKey = allBatchKeys.at(-1)!;
+      return [...cached.ops];
     }
+
+    // First read: download all batches in parallel
+    const ops = await this.downloadBatches(allBatchKeys);
+    this.opsCache.set(relativePath, {
+      ops: [...ops],
+      lastBatchKey: allBatchKeys.at(-1)!,
+    });
     return ops;
   }
 
   async truncateLastOp(relativePath: string): Promise<boolean> {
-    const key = this.key(relativePath);
-    const content = await this.getObjectOrNull(key);
-    if (content === null || content.trim().length === 0) return false;
-
-    const lines = content.trimEnd().split("\n");
-    if (lines.length <= 1) {
-      await this.putObject(key, "", "application/x-ndjson");
+    if (!this.isBatchFormat(relativePath)) {
+      // Legacy single-file format
+      const key = this.key(relativePath);
+      const content = await this.getObjectOrNull(key);
+      if (content === null || content.trim().length === 0) return false;
+      const lines = content.trimEnd().split("\n");
+      if (lines.length <= 1) {
+        await this.putObject(key, "", "application/x-ndjson");
+        return true;
+      }
+      lines.pop();
+      await this.putObject(
+        key,
+        lines.join("\n") + "\n",
+        "application/x-ndjson",
+      );
       return true;
     }
-    lines.pop();
-    await this.putObject(
-      key,
-      lines.join("\n") + "\n",
-      "application/x-ndjson",
-    );
+
+    // Per-batch: find last batch, modify or delete it
+    const batchKeys = await this.listBatchKeys(relativePath);
+    if (batchKeys.length === 0) return false;
+
+    const lastKey = batchKeys.at(-1)!;
+    const content = await this.getObject(lastKey);
+    const lines = content.trimEnd().split("\n").filter(Boolean);
+
+    if (lines.length <= 1) {
+      // Single op in this batch — delete the whole object
+      await this.deleteObject(lastKey);
+    } else {
+      // Multiple ops — remove last line, re-upload
+      lines.pop();
+      await this.putObject(
+        lastKey,
+        lines.join("\n") + "\n",
+        "application/x-ndjson",
+      );
+    }
+
+    // Invalidate cache (state changed)
+    this.opsCache.delete(relativePath);
     return true;
   }
 
   async createOpsFile(): Promise<string> {
-    const filename = `ops-${Date.now()}.jsonl`;
-    const relativePath = `ops/${filename}`;
-    await this.putObject(
-      this.key(relativePath),
-      "",
-      "application/x-ndjson",
-    );
-    return relativePath;
+    // Per-batch format: return a virtual prefix (no S3 object created)
+    return `ops/wal-${Date.now()}`;
   }
 
   // -- Archive --
@@ -367,21 +493,26 @@ export class S3Backend implements StorageBackend {
   // -- Multi-writer extensions --
 
   async createAgentOpsFile(agentId: string): Promise<string> {
-    const filename = `agent-${agentId}-${Date.now()}.jsonl`;
-    const relativePath = `ops/${filename}`;
-    await this.putObject(
-      this.key(relativePath),
-      "",
-      "application/x-ndjson",
-    );
-    return relativePath;
+    // Per-batch format: return a virtual prefix (no S3 object created)
+    return `ops/agent-${agentId}-${Date.now()}`;
   }
 
   async listOpsFiles(): Promise<string[]> {
     const keys = await this.listKeys(this.key("ops/"));
-    return keys
-      .filter((k) => k.endsWith(".jsonl"))
-      .map((k) => this.relativeFromKey(k));
+    // Collect unique WAL prefixes: both legacy .jsonl files and batch directories
+    const paths = new Set<string>();
+    for (const k of keys) {
+      const rel = this.relativeFromKey(k);
+      if (rel.endsWith(".jsonl") && !rel.includes("/batch-")) {
+        // Legacy single-file WAL
+        paths.add(rel);
+      } else if (rel.includes("/batch-")) {
+        // Per-batch: extract prefix (everything before /batch-)
+        const prefix = rel.slice(0, rel.indexOf("/batch-"));
+        paths.add(prefix);
+      }
+    }
+    return Array.from(paths);
   }
 
   async acquireCompactionLock(): Promise<LockHandle> {
