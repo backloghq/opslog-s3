@@ -537,4 +537,55 @@ export class S3Backend implements StorageBackend {
       throw err;
     }
   }
+
+  // -- Blob storage --
+
+  async writeBlob(relativePath: string, content: Buffer): Promise<void> {
+    await this.client.send(
+      new PutObjectCommand({
+        Bucket: this.bucket,
+        Key: this.key(relativePath),
+        Body: content,
+      }),
+    );
+  }
+
+  async readBlob(relativePath: string): Promise<Buffer> {
+    const result = await this.client.send(
+      new GetObjectCommand({
+        Bucket: this.bucket,
+        Key: this.key(relativePath),
+      }),
+    );
+    return Buffer.from(await result.Body!.transformToByteArray());
+  }
+
+  async listBlobs(prefix: string): Promise<string[]> {
+    const fullPrefix = this.key(prefix) + "/";
+    const result = await this.client.send(
+      new ListObjectsV2Command({
+        Bucket: this.bucket,
+        Prefix: fullPrefix,
+      }),
+    );
+    return (result.Contents ?? [])
+      .map((obj) => obj.Key!.slice(fullPrefix.length))
+      .filter((name) => name.length > 0 && !name.includes("/"));
+  }
+
+  async deleteBlob(relativePath: string): Promise<void> {
+    await this.client.send(
+      new DeleteObjectCommand({
+        Bucket: this.bucket,
+        Key: this.key(relativePath),
+      }),
+    );
+  }
+
+  async deleteBlobDir(prefix: string): Promise<void> {
+    const blobs = await this.listBlobs(prefix);
+    for (const name of blobs) {
+      await this.deleteBlob(`${prefix}/${name}`);
+    }
+  }
 }
