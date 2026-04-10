@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.2.0 (2026-04-10)
+
+### Added
+- **Blob storage** — S3Backend implements `writeBlob`, `readBlob`, `listBlobs`, `deleteBlob`, `deleteBlobDir`. Stores blobs as S3 objects at `<prefix>/<relativePath>`. Requires opslog >=0.6.0.
+
 ## 0.1.1 (2026-04-09)
 
 ### Changed
