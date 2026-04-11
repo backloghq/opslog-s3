@@ -111,6 +111,16 @@ Stores created with v0.1.0 (single `.jsonl` files) are transparently supported �
 
 Uses S3 conditional writes (`IfNoneMatch: *`) for lock acquisition — fails atomically if the lock already exists. Lock objects carry a TTL; stale locks from crashed agents are automatically recovered.
 
+### Blob storage + byte-range reads
+
+```typescript
+await backend.writeBlob("data/records.jsonl", buffer);
+const full = await backend.readBlob("data/records.jsonl");
+const range = await backend.readBlobRange("data/records.jsonl", 1024, 256); // HTTP Range header
+```
+
+`readBlobRange` uses S3 `GetObject` with `Range: bytes=N-M` header — reads only the requested bytes. Enables O(1) point lookups in JSONL record stores without downloading the full object.
+
 ### Conflict resolution
 
 When multiple agents write to the same key, opslog's Lamport clock ordering resolves conflicts via last-writer-wins. See [opslog multi-writer docs](https://github.com/backloghq/opslog#multi-writer-mode) for details.

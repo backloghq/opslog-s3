@@ -350,4 +350,43 @@ describe.skipIf(!bucket)("S3Backend (real S3)", () => {
       await readerA.close();
     });
   });
+
+  describe("readBlobRange", () => {
+    it("reads byte range from S3 using Range header", async () => {
+      const backend = makeBackend(`${prefix}/blob-range`);
+      await backend.initialize("", { readOnly: false });
+
+      // Write a JSONL record store
+      const records = [
+        JSON.stringify({ _id: "a", title: "First record" }),
+        JSON.stringify({ _id: "b", title: "Second record" }),
+        JSON.stringify({ _id: "c", title: "Third record" }),
+      ];
+      const content = records.join("\n") + "\n";
+      await backend.writeBlob("records.jsonl", Buffer.from(content));
+
+      // Build offset index
+      let offset = 0;
+      const offsets: Array<{ offset: number; length: number }> = [];
+      for (const line of records) {
+        const len = Buffer.byteLength(line, "utf-8");
+        offsets.push({ offset, length: len });
+        offset += len + 1;
+      }
+
+      // Read second record by byte range
+      const buf = await backend.readBlobRange("records.jsonl", offsets[1].offset, offsets[1].length);
+      const record = JSON.parse(buf.toString("utf-8"));
+      expect(record._id).toBe("b");
+      expect(record.title).toBe("Second record");
+
+      // Read first record
+      const buf0 = await backend.readBlobRange("records.jsonl", offsets[0].offset, offsets[0].length);
+      expect(JSON.parse(buf0.toString("utf-8"))._id).toBe("a");
+
+      // Read third record
+      const buf2 = await backend.readBlobRange("records.jsonl", offsets[2].offset, offsets[2].length);
+      expect(JSON.parse(buf2.toString("utf-8"))._id).toBe("c");
+    });
+  });
 });

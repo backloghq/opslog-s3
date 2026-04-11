@@ -537,4 +537,59 @@ describe("S3Backend", () => {
       expect(ops).toHaveLength(1);
     });
   });
+
+  describe("readBlobRange", () => {
+    beforeEach(async () => {
+      await backend.initialize("", { readOnly: false });
+    });
+
+    it("reads byte range from S3 object", async () => {
+      await backend.writeBlob("range-test.txt", Buffer.from("Hello, World!"));
+      const buf = await backend.readBlobRange("range-test.txt", 0, 5);
+      expect(buf.toString("utf-8")).toBe("Hello");
+    });
+
+    it("reads middle of file", async () => {
+      await backend.writeBlob("range-test.txt", Buffer.from("Hello, World!"));
+      const buf = await backend.readBlobRange("range-test.txt", 7, 5);
+      expect(buf.toString("utf-8")).toBe("World");
+    });
+
+    it("works with JSONL record store pattern", async () => {
+      const records = [
+        JSON.stringify({ _id: "a", title: "First" }),
+        JSON.stringify({ _id: "b", title: "Second" }),
+        JSON.stringify({ _id: "c", title: "Third" }),
+      ];
+      const content = records.join("\n") + "\n";
+      await backend.writeBlob("records.jsonl", Buffer.from(content));
+
+      // Build offset index
+      let offset = 0;
+      const offsets: Array<{ offset: number; length: number }> = [];
+      for (const line of records) {
+        const len = Buffer.byteLength(line, "utf-8");
+        offsets.push({ offset, length: len });
+        offset += len + 1;
+      }
+
+      // Read second record by offset
+      const buf = await backend.readBlobRange("records.jsonl", offsets[1].offset, offsets[1].length);
+      const record = JSON.parse(buf.toString("utf-8"));
+      expect(record._id).toBe("b");
+      expect(record.title).toBe("Second");
+    });
+
+    it("returns empty buffer for zero length", async () => {
+      await backend.writeBlob("data.txt", Buffer.from("content"));
+      const buf = await backend.readBlobRange("data.txt", 0, 0);
+      expect(buf.length).toBe(0);
+    });
+
+    it("throws on negative offset or length", async () => {
+      await backend.writeBlob("neg.txt", Buffer.from("data"));
+      await expect(backend.readBlobRange("neg.txt", -1, 5)).rejects.toThrow("non-negative");
+      await expect(backend.readBlobRange("neg.txt", 0, -1)).rejects.toThrow("non-negative");
+    });
+  });
 });

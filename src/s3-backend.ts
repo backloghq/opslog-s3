@@ -583,6 +583,19 @@ export class S3Backend implements StorageBackend {
     return Buffer.from(await result.Body!.transformToByteArray());
   }
 
+  async readBlobRange(relativePath: string, offset: number, length: number): Promise<Buffer> {
+    if (offset < 0 || length < 0) throw new Error("readBlobRange: offset and length must be non-negative");
+    if (length === 0) return Buffer.alloc(0);
+    const result = await this.client.send(
+      new GetObjectCommand({
+        Bucket: this.bucket,
+        Key: this.key(relativePath),
+        Range: `bytes=${offset}-${offset + length - 1}`,
+      }),
+    );
+    return Buffer.from(await result.Body!.transformToByteArray());
+  }
+
   async listBlobs(prefix: string): Promise<string[]> {
     const fullPrefix = this.key(prefix) + "/";
     const result = await this.client.send(

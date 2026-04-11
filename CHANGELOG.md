@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.4.0 (2026-04-11)
+
+### Added
+- **`readBlobRange(path, offset, length)`** — byte-range read via S3 `GetObject` with `Range` header. Enables O(1) point lookups in JSONL record stores without downloading the full object.
+
+### Changed
+- **Peer dependency** bumped to `@backloghq/opslog >=0.8.0`
+
 ## 0.3.0 (2026-04-11)
 
 ### Changed

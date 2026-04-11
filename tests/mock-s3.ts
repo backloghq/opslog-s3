@@ -58,7 +58,7 @@ export function createMockS3(): { client: S3Client; store: MockS3Store } {
     }
 
     if (command instanceof GetObjectCommand) {
-      const { Key } = command.input;
+      const { Key, Range } = command.input;
       const obj = store.objects.get(Key!);
       if (!obj) {
         throw makeError(
@@ -67,8 +67,21 @@ export function createMockS3(): { client: S3Client; store: MockS3Store } {
           404,
         );
       }
+      let body = obj.body;
+      // Support Range header for byte-range reads
+      if (Range) {
+        const match = Range.match(/^bytes=(\d+)-(\d+)$/);
+        if (match) {
+          const start = parseInt(match[1], 10);
+          const end = parseInt(match[2], 10);
+          body = body.slice(start, end + 1);
+        }
+      }
       return {
-        Body: { transformToString: async () => obj.body },
+        Body: {
+          transformToString: async () => body,
+          transformToByteArray: async () => Buffer.from(body),
+        },
         ETag: obj.etag,
         ContentType: obj.contentType,
       };
