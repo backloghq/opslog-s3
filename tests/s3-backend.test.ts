@@ -1,13 +1,15 @@
 import { describe, it, expect, beforeEach } from "vitest";
 import type { Manifest } from "@backloghq/opslog";
 import { S3Backend } from "../src/s3-backend.js";
-import { createMockS3 } from "./mock-s3.js";
+import { createMockS3, type MockS3Store } from "./mock-s3.js";
 
 describe("S3Backend", () => {
   let backend: S3Backend;
+  let mockStore: MockS3Store;
 
   beforeEach(() => {
-    const { client } = createMockS3();
+    const { client, store } = createMockS3();
+    mockStore = store;
     backend = new S3Backend({ bucket: "test-bucket", prefix: "store", client });
   });
 
@@ -77,18 +79,65 @@ describe("S3Backend", () => {
       await backend.initialize("", { readOnly: false });
     });
 
-    it("writes and loads a snapshot", async () => {
+    it("writes JSONL snapshot and loads it back", async () => {
       const records = new Map<string, unknown>([
         ["a", { x: 1 }],
         ["b", { x: 2 }],
       ]);
       const path = await backend.writeSnapshot(records, 1);
-      expect(path).toMatch(/^snapshots\/snap-\d+\.json$/);
+      expect(path).toMatch(/^snapshots\/snap-\d+\.jsonl$/);
 
       const loaded = await backend.loadSnapshot(path);
       expect(loaded.version).toBe(1);
       expect(loaded.records.get("a")).toEqual({ x: 1 });
       expect(loaded.records.get("b")).toEqual({ x: 2 });
+    });
+
+    it("JSONL snapshot has correct line structure", async () => {
+      const records = new Map<string, unknown>([
+        ["a", { name: "Alice" }],
+        ["b", { name: "Bob" }],
+      ]);
+      await backend.writeSnapshot(records, 1);
+
+      // Read raw content from mock S3 (keys are prefixed with "store/")
+      let content = "";
+      for (const [, obj] of mockStore.objects) {
+        if (obj.contentType === "application/x-jsonlines") {
+          content = obj.body;
+          break;
+        }
+      }
+      const lines = content.trim().split("\n");
+      expect(lines.length).toBe(3); // header + 2 records
+
+      const header = JSON.parse(lines[0]);
+      expect(header.version).toBe(1);
+      expect(header.timestamp).toBeTruthy();
+      expect("records" in header).toBe(false);
+
+      const rec = JSON.parse(lines[1]);
+      expect(rec.id).toBeTruthy();
+      expect(rec.data).toBeTruthy();
+    });
+
+    it("loads legacy JSON snapshot (backward compat)", async () => {
+      // Write a legacy monolithic JSON snapshot directly to mock S3
+      const legacySnapshot = JSON.stringify({
+        version: 1,
+        timestamp: new Date().toISOString(),
+        records: { x: { val: 10 }, y: { val: 20 } },
+      });
+      mockStore.objects.set("store/snapshots/snap-legacy.json", {
+        body: legacySnapshot,
+        etag: '"legacy"',
+        contentType: "application/json",
+      });
+
+      const loaded = await backend.loadSnapshot("snapshots/snap-legacy.json");
+      expect(loaded.version).toBe(1);
+      expect(loaded.records.get("x")).toEqual({ val: 10 });
+      expect(loaded.records.get("y")).toEqual({ val: 20 });
     });
 
     it("throws on missing snapshot", async () => {

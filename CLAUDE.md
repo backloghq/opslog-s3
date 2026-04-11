@@ -12,7 +12,7 @@ An implementation of opslog's `StorageBackend` interface backed by Amazon S3. Al
 s3://bucket/prefix/
   manifest.json                       # Current snapshot + ops file pointers
   snapshots/
-    snap-<timestamp>.json             # Immutable full-state captures
+    snap-<timestamp>.jsonl            # Immutable full-state captures (JSONL)
   ops/
     ops-<timestamp>.jsonl             # Single-writer WAL
     agent-<id>-<timestamp>.jsonl      # Per-agent WAL (multi-writer)
@@ -57,7 +57,7 @@ tests/
 ## Dependencies
 
 - **Runtime**: `@aws-sdk/client-s3` — AWS SDK v3 S3 client
-- **Peer**: `@backloghq/opslog` (>=0.3.0) — provides `StorageBackend` interface and validators
+- **Peer**: `@backloghq/opslog` (>=0.7.0) — provides `StorageBackend` interface and validators
 
 ## Coding Conventions
 

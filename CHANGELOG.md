@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.3.0 (2026-04-11)
+
+### Changed
+- **JSONL snapshot format** — `writeSnapshot()` now writes JSONL (header + one record per line) instead of monolithic JSON. `loadSnapshot()` auto-detects format and reads both JSONL and legacy JSON. Aligns with opslog v0.7.0 snapshot format.
+- **Peer dependency** bumped to `@backloghq/opslog >=0.7.0`
+
 ## 0.2.0 (2026-04-10)
 
 ### Added
