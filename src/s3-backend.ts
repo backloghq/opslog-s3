@@ -251,17 +251,19 @@ export class S3Backend implements StorageBackend {
     version: number,
   ): Promise<string> {
     const timestamp = new Date().toISOString();
-    const filename = `snap-${Date.now()}.json`;
+    const filename = `snap-${Date.now()}.jsonl`;
     const relativePath = `snapshots/${filename}`;
-    const snapshot = {
-      version,
-      timestamp,
-      records: Object.fromEntries(records),
-    };
+
+    // JSONL format: header line + one record per line
+    const lines: string[] = [JSON.stringify({ version, timestamp })];
+    for (const [id, data] of records) {
+      lines.push(JSON.stringify({ id, data }));
+    }
+
     await this.putObject(
       this.key(relativePath),
-      JSON.stringify(snapshot, null, 2),
-      "application/json",
+      lines.join("\n") + "\n",
+      "application/x-jsonlines",
     );
     return relativePath;
   }
@@ -270,11 +272,32 @@ export class S3Backend implements StorageBackend {
     relativePath: string,
   ): Promise<{ records: Map<string, unknown>; version: number }> {
     const content = await this.getObject(this.key(relativePath));
-    const snapshot = validateSnapshot(JSON.parse(content));
-    return {
-      records: new Map(Object.entries(snapshot.records)),
-      version: snapshot.version,
-    };
+
+    // Detect format: JSONL (first line is header without "records" key) vs legacy JSON
+    const firstNewline = content.indexOf("\n");
+    const firstLine = firstNewline === -1 ? content : content.slice(0, firstNewline);
+    const parsed = JSON.parse(firstLine);
+
+    if ("records" in parsed) {
+      // Legacy monolithic JSON format
+      const snapshot = validateSnapshot(parsed);
+      return {
+        records: new Map(Object.entries(snapshot.records)),
+        version: snapshot.version,
+      };
+    }
+
+    // JSONL format: first line = header, remaining lines = records
+    const header = parsed as { version: number; timestamp: string };
+    const records = new Map<string, unknown>();
+    const lines = content.split("\n");
+    for (let i = 1; i < lines.length; i++) {
+      const line = lines[i].trim();
+      if (!line) continue;
+      const entry = JSON.parse(line) as { id: string; data: unknown };
+      records.set(entry.id, entry.data);
+    }
+    return { records, version: header.version };
   }
 
   // -- WAL --

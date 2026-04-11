@@ -85,7 +85,7 @@ const backend = new S3Backend({ bucket: "my-bucket", client });
 ```
 s3://bucket/prefix/
   manifest.json                       # Store metadata
-  snapshots/snap-<ts>.json            # Immutable state captures
+  snapshots/snap-<ts>.jsonl           # Immutable state captures (JSONL)
   ops/agent-<id>-<ts>.jsonl           # Per-agent WAL files
   archive/archive-<period>.json       # Archived records
 ```
