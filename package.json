@@ -11,7 +11,7 @@
     "test": "vitest run",
     "test:watch": "vitest",
     "test:coverage": "vitest run --coverage",
-    "test:integration": "vitest run tests/s3-real.test.ts"
+    "test:integration": "vitest run tests/s3-integration.test.ts"
   },
   "keywords": [
     "opslog",
