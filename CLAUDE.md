@@ -57,7 +57,7 @@ tests/
 ## Dependencies
 
 - **Runtime**: `@aws-sdk/client-s3` — AWS SDK v3 S3 client
-- **Peer**: `@backloghq/opslog` (>=0.7.0) — provides `StorageBackend` interface and validators
+- **Peer**: `@backloghq/opslog` (>=0.8.0) — provides `StorageBackend` interface and validators
 
 ## Coding Conventions
 
