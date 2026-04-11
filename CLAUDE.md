@@ -49,9 +49,10 @@ src/
   s3-backend.ts       # S3Backend implementing StorageBackend
   index.ts            # Exports
 tests/
-  mock-s3.ts          # In-memory mock S3 client for testing
-  s3-backend.test.ts  # S3Backend unit tests
-  store-integration.test.ts  # opslog Store + S3Backend end-to-end tests
+  mock-s3.ts               # In-memory mock S3 client for testing (supports Range header)
+  s3-backend.test.ts       # S3Backend unit tests against mock
+  store-integration.test.ts # opslog Store + S3Backend end-to-end tests against mock
+  s3-integration.test.ts   # Real S3 integration tests (requires AWS credentials)
 ```
 
 ## Dependencies
