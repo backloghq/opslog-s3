@@ -96,7 +96,7 @@ export class S3Backend implements StorageBackend {
 
   constructor(options: S3BackendOptions) {
     this.bucket = options.bucket;
-    this.prefix = options.prefix ?? "";
+    this.prefix = (options.prefix ?? "").replace(/\/+$/, "");
     this.lockTtlMs = options.lockTtlMs ?? DEFAULT_LOCK_TTL_MS;
 
     if (options.client) {

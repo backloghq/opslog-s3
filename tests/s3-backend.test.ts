@@ -536,6 +536,32 @@ describe("S3Backend", () => {
       const ops = await noPrefix.readOps(path);
       expect(ops).toHaveLength(1);
     });
+
+    it("strips trailing slashes from prefix to prevent // double-slash keys", async () => {
+      const { client, store } = createMockS3();
+      const trailingSlash = new S3Backend({
+        bucket: "b",
+        prefix: "my/store/",
+        client,
+      });
+      await trailingSlash.initialize("", { readOnly: false });
+      await trailingSlash.writeManifest({
+        version: 1,
+        currentSnapshot: "snapshots/snap-1.json",
+        activeOps: "ops/wal-1",
+        archiveSegments: [],
+        stats: {
+          activeRecords: 0,
+          archivedRecords: 0,
+          opsCount: 0,
+          created: "2026-01-01T00:00:00Z",
+          lastCheckpoint: "2026-01-01T00:00:00Z",
+        },
+      });
+      // Must be "my/store/manifest.json", not "my/store//manifest.json"
+      expect(store.objects.has("my/store/manifest.json")).toBe(true);
+      expect(store.objects.has("my/store//manifest.json")).toBe(false);
+    });
   });
 
   describe("readBlobRange", () => {
