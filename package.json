@@ -1,6 +1,6 @@
 {
   "name": "@backloghq/opslog-s3",
-  "version": "0.4.0",
+  "version": "0.4.1",
   "description": "S3 storage backend for @backloghq/opslog. Enables multi-writer concurrency across machines via Amazon S3.",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
