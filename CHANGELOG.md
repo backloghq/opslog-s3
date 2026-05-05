@@ -1,5 +1,10 @@
 # Changelog
 
+## [Unreleased]
+
+### Fixed
+- **Trailing slash in prefix no longer produces `//` double-slash S3 keys** — `S3Backend` constructor now normalizes `options.prefix` by stripping any trailing slashes via `.replace(/\/+$/, "")`. Previously, callers passing `"store/"` would produce keys like `"store//manifest.json"` which MinIO and real S3 both reject with `XMinioInvalidObjectName`.
+
 ## 0.4.0 (2026-04-11)
 
 ### Added
